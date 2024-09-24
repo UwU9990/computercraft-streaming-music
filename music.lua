@@ -32,7 +32,7 @@ local speakers = { peripheral.find("speaker") }
 if #speakers == 0 then
     error("No speakers attached", 0)
 end
-local speaker = speakers[1]
+local speaker = speakers[2]
 
 os.startTimer(1)
 
