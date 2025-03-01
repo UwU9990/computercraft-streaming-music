@@ -10,7 +10,9 @@ import dfpwm from "dfpwm";
 const ytmusic = new YTMusic()
 await ytmusic.initialize()
 
-export const ipod = onRequest((req, res) => {
+const rapidapi_api_keys = ["YOUR API KEY HERE"];
+
+export const ipod = onRequest({ memory: "512MiB", maxInstances: 3 }, (req, res) => {
 
     if (req.query.id) {
 
@@ -18,67 +20,52 @@ export const ipod = onRequest((req, res) => {
 
         return new Promise(function (resolve, reject) {
 
-            // Download the audio using the cobalt.tools API. Documentation: https://github.com/imputnet/cobalt/blob/current/docs/api.md
-            fetch('https://api.cobalt.tools/api/json', {
-                method: 'POST',
-                body: JSON.stringify({
-                    url: 'https://www.youtube.com/watch?v=' + req.query.id,
-                    isAudioOnly: true,
-                    vQuality: '144',
-                    aFormat: 'opus'
-                }),
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                }
-            })
-                .then(response => response.json())
-                .then(function (json) {
-                    if (json.url) {
+            getYoutubeDownloadUrl(req.query.id).then(function (url) {
 
-                        // Transcode the audio from opus to s8. This reduces the file size and gets it ready for the dfpwm encoder.
-                        const transcoder = new prism.FFmpeg({
-                            args: [
-                                '-analyzeduration', '0',
-                                '-loglevel', '0',
-                                '-f', 's8',
-                                '-ar', '48000',
-                                '-ac', '1'
-                            ]
-                        })
+                // Transcode the audio from opus to s8. This reduces the file size and gets it ready for the dfpwm encoder.
+                const transcoder = new prism.FFmpeg({
+                    args: [
+                        '-analyzeduration', '0',
+                        '-loglevel', '0',
+                        '-f', 's8',
+                        '-ar', '48000',
+                        '-ac', '1'
+                    ]
+                })
 
-                        const filepath = path.join(os.tmpdir(), 'output.dfpwm');
+                const randomId = Date.now() + '-' + Math.random().toString(36).substring(2, 15);
+                const filepath = path.join(os.tmpdir(), 'output-' + randomId + '.dfpwm');
 
-                        fetch(json.url, { method: 'GET' }).then(function (response) {
-                            if (response.ok) {
-                                response.body
-                                    .pipe(transcoder)
-                                    .pipe(new dfpwm.Encoder())
-                                    .pipe(fs.createWriteStream(filepath))
-                                    .on('finish', function () {
-                                        resolve(res.status(200).send(fs.readFileSync(filepath)));
-                                    })
-                                    .on('error', function (error) {
-                                        console.error(error)
-                                        reject(res.status(500).send("Error 500"));
-                                    })
-                            } else {
-                                console.log(response.status)
+                fetch(url, { method: 'GET' }).then(function (response) {
+                    if (response.ok) {
+                        response.body
+                            .pipe(transcoder)
+                            .pipe(new dfpwm.Encoder())
+                            .pipe(fs.createWriteStream(filepath))
+                            .on('finish', function () {
+                                resolve(res.status(200).send(fs.readFileSync(filepath)));
+                                fs.unlink(filepath, () => {});
+                            })
+                            .on('error', function (error) {
+                                console.error(error)
+                                fs.unlink(filepath, () => {});
                                 reject(res.status(500).send("Error 500"));
-                            }
-                        }).catch(function (error) {
-                            console.error(error)
-                            reject(res.status(500).send("Error 500"));
-                        });
-
+                            })
                     } else {
-                        console.log(json);
+                        console.log(response.status)
+                        fs.unlink(filepath, () => {});
                         reject(res.status(500).send("Error 500"));
                     }
                 }).catch(function (error) {
-                    console.error(error);
+                    console.error(error)
+                    fs.unlink(filepath, () => {});
                     reject(res.status(500).send("Error 500"));
                 });
+
+            }).catch(function (error) {
+                console.error(error);
+                reject(res.status(500).send("Error 500"));
+            });
 
         })
 
@@ -91,7 +78,7 @@ export const ipod = onRequest((req, res) => {
             // If you paste in a youtube link into the search box, get the video id and look it up directly
 
             let youtube_url_match = req.query.search.match(/((?:https?:)?\/\/)?((?:www|m|music)\.)?((?:youtube\.com|youtu.be))(\/(?:[\w\-]+\?v=|embed\/|v\/)?)([\w\-]+)(\S+)?$/);
-            if (youtube_url_match?.[5]) {
+            if (youtube_url_match?.[5]?.length == 11) {
 
                 ytmusic.getVideo(youtube_url_match[5]).then(function (result) {
                     resolve(res.status(200).send(JSON.stringify([{
@@ -136,3 +123,41 @@ export const ipod = onRequest((req, res) => {
         res.status(400).send("Bad request");
     }
 });
+
+function getYoutubeDownloadUrl(id) {
+    let max_attempts = 3;
+    let which_key = Math.floor(Math.random() * rapidapi_api_keys.length);
+
+    return new Promise(function (resolve, reject) {
+        function attempt(att) {
+            fetch('https://yt-api.p.rapidapi.com/dl?id='+id+'&cgeo=US', {
+                method: 'GET',
+                headers: {
+                    'x-rapidapi-key': rapidapi_api_keys[(which_key + att - 1) % rapidapi_api_keys.length],
+                    'x-rapidapi-host': 'yt-api.p.rapidapi.com'
+                }
+            })
+                .then(response => response.json())
+                .then(function (json) {
+                    let url = json?.formats?.[0]?.url;
+                    if (url) {
+                        resolve(url);
+                    } else {
+                        failed("No download url");
+                    }
+                }).catch(function (error) {
+                    console.error(error);
+                    failed(error);
+                });
+
+            function failed(error) {
+                if (att < max_attempts) {
+                    attempt(att + 1);
+                } else {
+                    reject(error);
+                }
+            }
+        }
+        attempt(1);
+    });
+}
